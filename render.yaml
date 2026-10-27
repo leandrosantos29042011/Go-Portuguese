@@ -1,5 +1,7 @@
+
 services:
   - type: web
+    plan: free
     name: go-portuguese-backend
     runtime: python
     buildCommand: pip install -r requirements.txt
