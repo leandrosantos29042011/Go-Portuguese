@@ -1,14 +1,13 @@
-
 services:
   - type: web
     plan: free
-    name: go-portuguese-backend
+    name: go-portuguese
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker main:app
+    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT main:app
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: TEACHER_PIN
-        sync: false
+        value: adm@437
