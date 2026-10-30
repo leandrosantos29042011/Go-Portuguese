@@ -289,9 +289,10 @@
                     </div>
                     <button onclick="app.forceStartMatch()" class="lp-block-btn bg-brandCyan text-lpText px-3 py-1.5 text-xs shadow-lp-cyan">Iniciar Partida</button>
                 </div>
-                <div class="flex gap-2">
-                    <button onclick="app.exportCSV()" class="flex-1 lp-block-btn bg-brandBlue text-white py-2 text-xs shadow-lp-blue"><i class="fas fa-download"></i> CSV</button>
-                    <button onclick="app.resetMatch()" class="flex-1 lp-block-btn bg-red-500 text-white py-2 text-xs shadow-lp-sm"><i class="fas fa-rotate-left"></i> Reiniciar</button>
+                <div class="grid grid-cols-3 gap-2">
+                    <button onclick="app.forceFinishMatch()" class="lp-block-btn bg-brandYellow text-brandBlueDark py-2 text-xs shadow-lp-yellow"><i class="fas fa-trophy"></i> Pódio</button>
+                    <button onclick="app.exportCSV()" class="lp-block-btn bg-brandBlue text-white py-2 text-xs shadow-lp-blue"><i class="fas fa-download"></i> CSV</button>
+                    <button onclick="app.resetMatch()" class="lp-block-btn bg-red-500 text-white py-2 text-xs shadow-lp-sm"><i class="fas fa-rotate-left"></i> Reset</button>
                 </div>
             </div>
         </div>
@@ -765,11 +766,14 @@
                 this.currentQuestionIdx = 0;
                 this.activeQuestions = [];
                 this.answers = [];
-                this.timerInterval = null;
-                this.timeLeft = 25 * 60;
+                this.questionTimeLeft = 60; // 1 minuto por pergunta
+                this.questionTimerInterval = null;
+                this.matchTimeInterval = null;
+                this.isQuestionAnswered = false; // Previne cliques duplos / pontos a mais
                 this.isTransitioning = false;
                 this.pollTimer = null;
                 this.adminPollTimer = null;
+                this.waitingPodiumPollTimer = null;
                 this.matchStarted = false;
 
                 this.channel = new BroadcastChannel('goportuguese_classroom_v8');
@@ -777,10 +781,34 @@
 
                 this.classmates = [];
 
+                this.setupUnloadHandler();
                 this.renderHomeScreen();
             }
 
-            // GERENCIADOR DE TRANSIÇÃO FLUIDA ENTRE TELAS / PÁGINAS
+            setupUnloadHandler() {
+                window.addEventListener('beforeunload', () => this.leaveRoom());
+                window.addEventListener('pagehide', () => this.leaveRoom());
+            }
+
+            leaveRoom() {
+                if (!this.joinedRoomCode) return;
+                this.channel.postMessage({
+                    type: 'PLAYER_LEAVE',
+                    roomCode: this.joinedRoomCode,
+                    playerName: this.user.name
+                });
+                const payload = JSON.stringify({
+                    room_code: this.joinedRoomCode,
+                    player_name: this.user.name
+                });
+                const url = `${API_BASE}/api/rooms/leave`;
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon(url, new Blob([payload], { type: 'application/json' }));
+                } else {
+                    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true }).catch(() => {});
+                }
+            }
+
             navigateToPage(renderCallback, useCurtain = false) {
                 if (this.isTransitioning) return;
                 this.isTransitioning = true;
@@ -835,6 +863,14 @@
                         this.classmates.push(msg.player);
                     }
                     this.refreshLobbyList();
+                    this.refreshWaitingPodiumList();
+                } else if (msg.type === 'PLAYER_LEAVE' && msg.roomCode === this.joinedRoomCode) {
+                    this.classmates = this.classmates.filter(c => c.name !== msg.playerName);
+                    this.refreshLobbyList();
+                    this.refreshWaitingPodiumList();
+                } else if (msg.type === 'FORCE_FINISH' && msg.roomCode === this.joinedRoomCode) {
+                    if (this.waitingPodiumPollTimer) clearInterval(this.waitingPodiumPollTimer);
+                    this.navigateToPage(() => this.renderGrandFinale(), true);
                 }
             }
 
@@ -863,7 +899,8 @@
 
             goHome() {
                 audioManager.playClick();
-                clearInterval(this.timerInterval);
+                this.stopQuestionTimer();
+                clearInterval(this.matchTimeInterval);
                 this.navigateToPage(() => this.renderHomeScreen(), true);
             }
 
@@ -909,7 +946,7 @@
                                     class="w-full border-3 border-brandBlueDark rounded-xl p-3 font-bold text-lg focus:outline-none focus:bg-blue-50">
                             </div>
 
-                            <!-- PALCO DE PRÉVIA DO PERSONAGEM (GATHER STYLE EM CONTAINER AZUL DO JOGO) -->
+                            <!-- PALCO DE PRÉVIA DO PERSONAGEM (GATHER STYLE) -->
                             <div class="bg-gradient-to-b from-blue-100 to-blue-200 border-3 border-brandBlueDark rounded-2xl p-6 mb-4 flex flex-col items-center justify-center relative overflow-hidden">
                                 <div id="avatarPreviewContainer" class="py-2">
                                     ${renderGatherPixelAvatarSvg(this.user.avatar, 130)}
@@ -917,7 +954,7 @@
                                 <span id="avatarNameDisplay" class="font-fredoka text-xl font-extrabold text-brandBlueDark">${this.user.name}</span>
                             </div>
 
-                            <!-- NAVEGAÇÃO POR ABAS TIPO GATHER.TOWN -->
+                            <!-- NAVEGAÇÃO POR ABAS -->
                             <div class="flex border-b-3 border-brandBlueDark mb-4 gap-1">
                                 <button onclick="app.setCustomTab('base')" class="px-3 py-2 font-fredoka font-bold text-xs rounded-t-xl transition ${this.activeTab === 'base' ? 'bg-brandBlue text-white border-3 border-b-0 border-brandBlueDark' : 'bg-gray-100 text-brandBlue hover:bg-blue-50'}">
                                     Base
@@ -939,7 +976,7 @@
                             </div>
                         </div>
 
-                        <!-- PAINEL DE SALA DO PROFESSOR / SAGUÃO -->
+                        <!-- PAINEL DE ENTRADA NA SALA / SAGUÃO -->
                         <div class="md:col-span-5 flex flex-col gap-6">
                             <div class="lp-block bg-brandBlueDark text-white p-6 border-white text-center">
                                 <h3 class="font-fredoka text-2xl font-bold mb-2">Entrar na Sala</h3>
@@ -1172,7 +1209,7 @@
                                     <div class="animate-countdown font-fredoka text-9xl font-black text-brandCyan drop-shadow-[0_8px_0_#001A80]">
                                         ${c}
                                     </div>
-                                    <p class="text-white font-bold text-sm">Sorteando 30 questões exclusivas sem repetição...</p>
+                                    <p class="text-white font-bold text-sm">Cada questão tem limite de 1 minuto. Boa sorte!</p>
                                 </div>
                             `;
                             setTimeout(() => renderStep(c - 1), 1000);
@@ -1215,40 +1252,110 @@
             startMatch() {
                 audioManager.playCountdownGo();
                 this.matchStarted = true;
-                this.timeLeft = 25 * 60;
                 this.currentQuestionIdx = 0;
                 this.answers = [];
                 this.user.score = 0;
+                this.user.timeSeconds = 0;
                 this.user.completed = false;
 
                 if (!this.activeQuestions || this.activeQuestions.length === 0) {
                     this.generatePlayerQuestions();
                 }
 
+                // Timer global de tempo decorrido para critério de desempate
+                clearInterval(this.matchTimeInterval);
+                this.matchTimeInterval = setInterval(() => {
+                    this.user.timeSeconds++;
+                }, 1000);
+
                 this.broadcastUser();
-                this.startTimer();
                 this.renderQuestionView();
             }
 
-            startTimer() {
-                clearInterval(this.timerInterval);
-                this.timerInterval = setInterval(() => {
-                    this.timeLeft--;
-                    this.user.timeSeconds++;
-                    const timerElem = document.getElementById('matchTimer');
-                    if (timerElem) {
-                        const m = Math.floor(this.timeLeft / 60).toString().padStart(2, '0');
-                        const s = (this.timeLeft % 60).toString().padStart(2, '0');
-                        timerElem.innerText = `${m}:${s}`;
-                    }
-                    if (this.timeLeft <= 0) {
-                        clearInterval(this.timerInterval);
-                        this.finishMatch();
+            startQuestionTimer() {
+                this.stopQuestionTimer();
+                this.questionTimeLeft = 60; // Exatamente 1 minuto por pergunta
+                this.updateQuestionTimerUI();
+
+                this.questionTimerInterval = setInterval(() => {
+                    this.questionTimeLeft--;
+                    this.updateQuestionTimerUI();
+
+                    if (this.questionTimeLeft <= 0) {
+                        this.stopQuestionTimer();
+                        this.handleQuestionTimeout();
                     }
                 }, 1000);
             }
 
+            stopQuestionTimer() {
+                if (this.questionTimerInterval) {
+                    clearInterval(this.questionTimerInterval);
+                    this.questionTimerInterval = null;
+                }
+            }
+
+            updateQuestionTimerUI() {
+                const timerElem = document.getElementById('questionTimerText');
+                const barElem = document.getElementById('questionTimerBar');
+                const badgeElem = document.getElementById('questionTimerBadge');
+                if (timerElem) {
+                    timerElem.innerText = `${this.questionTimeLeft}s`;
+                }
+                if (barElem) {
+                    const pct = Math.max(0, (this.questionTimeLeft / 60) * 100);
+                    barElem.style.width = `${pct}%`;
+                    if (this.questionTimeLeft <= 10) {
+                        barElem.className = 'bg-brandRed h-full transition-all duration-300 animate-pulse';
+                        if (badgeElem) badgeElem.className = 'bg-red-100 border-2 border-red-600 px-3 py-1 rounded-xl flex items-center gap-2 animate-bounce';
+                    } else {
+                        barElem.className = 'bg-brandCyan h-full transition-all duration-300';
+                        if (badgeElem) badgeElem.className = 'bg-blue-100 border-2 border-brandBlueDark px-3 py-1 rounded-xl flex items-center gap-2';
+                    }
+                }
+            }
+
+            handleQuestionTimeout() {
+                if (this.isQuestionAnswered) return;
+                this.isQuestionAnswered = true;
+                audioManager.playWrong();
+
+                const q = this.activeQuestions[this.currentQuestionIdx];
+                this.disableOptionButtons();
+
+                const feedbackElem = document.getElementById('feedbackContainer');
+                const correctText = q.type === 'mc' ? q.options[q.ans] : q.answer;
+
+                feedbackElem.innerHTML = `
+                    <div class="bg-brandBlueDark border-4 border-white p-6 rounded-2xl shadow-2xl max-w-lg text-center text-white pointer-events-auto animate-shake">
+                        <h3 class="font-fredoka text-3xl font-black text-brandYellow mb-2">TEMPO ESGOTADO! ⏰</h3>
+                        <p class="text-sm font-bold mb-2 text-white">Você não respondeu no prazo de 1 minuto. A resposta correta era: <span class="text-brandCyan underline">${correctText}</span></p>
+                        <div class="bg-white/10 p-3 rounded-xl text-xs text-white/90 mb-4 text-left">
+                            <strong>Explicação:</strong> ${q.exp}
+                        </div>
+                        <button onclick="document.getElementById('feedbackContainer').innerHTML=''; app.nextQuestion();" 
+                            class="lp-block-btn bg-brandCyan text-brandBlueDark px-6 py-2 text-base font-black">
+                            Próxima Questão
+                        </button>
+                    </div>
+                `;
+
+                this.answers.push({ qId: q.id, isCorrect: false });
+            }
+
+            disableOptionButtons() {
+                const btns = document.querySelectorAll('#optionsContainer button');
+                btns.forEach(b => {
+                    b.disabled = true;
+                    b.style.pointerEvents = 'none';
+                    b.classList.add('opacity-70');
+                });
+                const input = document.getElementById('fillBlankInput');
+                if (input) input.disabled = true;
+            }
+
             renderQuestionView() {
+                this.isQuestionAnswered = false; // Reset da trava anti-duplo clique
                 const q = this.activeQuestions[this.currentQuestionIdx];
                 const appElem = document.getElementById('appContainer');
 
@@ -1271,15 +1378,16 @@
                                     <i class="fas fa-star text-yellow-500"></i>
                                     <span class="font-fredoka text-lg font-bold text-brandBlueDark">${this.user.score}</span>
                                 </div>
-                                <div class="bg-blue-100 border-2 border-brandBlueDark px-3 py-1 rounded-xl flex items-center gap-2">
-                                    <i class="fas fa-clock text-brandBlue"></i>
-                                    <span id="matchTimer" class="font-fredoka text-lg font-bold text-brandBlueDark">25:00</span>
+                                <div id="questionTimerBadge" class="bg-blue-100 border-2 border-brandBlueDark px-3 py-1 rounded-xl flex items-center gap-2">
+                                    <i class="fas fa-hourglass-half text-brandBlue"></i>
+                                    <span id="questionTimerText" class="font-fredoka text-lg font-bold text-brandBlueDark">60s</span>
                                 </div>
                             </div>
                         </div>
 
-                        <div class="w-full bg-blue-900 border-2 border-white h-4 rounded-full overflow-hidden">
-                            <div class="bg-brandCyan h-full transition-all duration-300" style="width: ${((this.currentQuestionIdx + 1) / this.activeQuestions.length) * 100}%"></div>
+                        <!-- Barra visual dos 60 segundos por questão -->
+                        <div class="w-full bg-blue-900 border-2 border-white h-3 rounded-full overflow-hidden">
+                            <div id="questionTimerBar" class="bg-brandCyan h-full transition-all duration-300" style="width: 100%"></div>
                         </div>
 
                         <div class="lp-block bg-white p-6 sm:p-8">
@@ -1308,15 +1416,29 @@
                         </div>
                     </div>
                 `;
+
+                this.startQuestionTimer();
             }
 
             selectAnswer(selectedIdx) {
+                // TRAVA CRÍTICA CONTRA CLIQUES REPETIDOS
+                if (this.isQuestionAnswered) return;
+                this.isQuestionAnswered = true;
+                this.stopQuestionTimer();
+                this.disableOptionButtons();
+
                 const q = this.activeQuestions[this.currentQuestionIdx];
                 const isCorrect = selectedIdx === q.ans;
                 this.handleAnswerFeedback(isCorrect, q, selectedIdx);
             }
 
             submitFillBlank() {
+                // TRAVA CRÍTICA CONTRA CLIQUES REPETIDOS
+                if (this.isQuestionAnswered) return;
+                this.isQuestionAnswered = true;
+                this.stopQuestionTimer();
+                this.disableOptionButtons();
+
                 const input = document.getElementById('fillBlankInput').value;
                 const q = this.activeQuestions[this.currentQuestionIdx];
                 
@@ -1333,6 +1455,7 @@
 
                 if (isCorrect) {
                     audioManager.playCorrect();
+                    // Pontos concedidos estritamente uma única vez por questão acertada
                     this.user.score += 100;
 
                     feedbackElem.innerHTML = `
@@ -1394,11 +1517,113 @@
             }
 
             async finishMatch() {
-                clearInterval(this.timerInterval);
+                this.stopQuestionTimer();
+                clearInterval(this.matchTimeInterval);
                 this.user.completed = true;
                 this.broadcastUser();
                 audioManager.playFanfare();
 
+                // Em vez de revelar o pódio imediatamente, vai para a sala de espera do pódio
+                this.navigateToPage(() => this.renderWaitingForClassmates(), true);
+            }
+
+            renderWaitingForClassmates() {
+                const appElem = document.getElementById('appContainer');
+                appElem.innerHTML = `
+                    <div class="w-full max-w-xl lp-block bg-white p-8 text-center space-y-6 my-auto shadow-2xl">
+                        <div class="relative inline-block animate-bounce">
+                            ${renderGatherPixelAvatarSvg(this.user.avatar, 100)}
+                            <span class="absolute -top-3 -right-3 text-3xl">🎯</span>
+                        </div>
+
+                        <div>
+                            <h2 class="font-fredoka text-3xl font-black text-brandBlue mb-1">Você Concluiu a Prova!</h2>
+                            <p class="text-sm font-bold text-gray-600">Sua pontuação final foi de <span class="text-brandBlue font-black text-lg">${this.user.score} pontos</span> em ${this.user.timeSeconds}s.</p>
+                        </div>
+
+                        <div class="p-4 bg-yellow-50 border-3 border-yellow-400 rounded-2xl flex flex-col items-center gap-2">
+                            <div class="flex items-center gap-2 text-yellow-800 font-fredoka font-bold text-base animate-pulse">
+                                <i class="fas fa-spinner fa-spin text-xl text-yellow-600"></i>
+                                <span>Aguardando os demais alunos terminarem...</span>
+                            </div>
+                            <span id="waitingCompletedCount" class="text-xs font-bold text-yellow-900 bg-yellow-200 px-3 py-1 rounded-full">
+                                Carregando progresso da turma...
+                            </span>
+                        </div>
+
+                        <div class="text-left">
+                            <h4 class="font-fredoka text-xs font-bold text-brandBlue/80 uppercase mb-2">Status da Turma em Tempo Real:</h4>
+                            <div id="waitingClassmatesList" class="space-y-2 max-h-48 overflow-y-auto pr-1">
+                                ${this.renderWaitingPodiumPlayers()}
+                            </div>
+                        </div>
+
+                        <p class="text-xs text-gray-400 font-semibold">O pódio dos campeões será revelado automaticamente na tela de todos assim que todos concluírem.</p>
+                    </div>
+                `;
+
+                this.startWaitingPodiumPolling();
+            }
+
+            refreshWaitingPodiumList() {
+                const listElem = document.getElementById('waitingClassmatesList');
+                if (listElem) {
+                    listElem.innerHTML = this.renderWaitingPodiumPlayers();
+                }
+            }
+
+            renderWaitingPodiumPlayers() {
+                const all = [this.user, ...this.classmates];
+                return all.map(p => `
+                    <div class="flex items-center justify-between p-2.5 rounded-xl border-2 ${p.completed ? 'bg-green-50 border-green-300 text-green-900' : 'bg-blue-50 border-blue-200 text-blue-900'} text-xs font-bold">
+                        <div class="flex items-center gap-2.5">
+                            ${renderGatherPixelAvatarSvg(p.avatar, 34)}
+                            <div>
+                                <span class="font-extrabold">${p.name} ${p.name === this.user.name ? '<span class="text-brandBlue font-black">(Você)</span>' : ''}</span>
+                                <div class="text-[10px] text-gray-500">${p.score} pts</div>
+                            </div>
+                        </div>
+                        <span class="px-2 py-1 rounded-lg text-[11px] font-black ${p.completed ? 'bg-green-200 text-green-800' : 'bg-yellow-200 text-yellow-800 animate-pulse'}">
+                            ${p.completed ? 'Concluído ✅' : 'Respondendo... ⏳'}
+                        </span>
+                    </div>
+                `).join('');
+            }
+
+            startWaitingPodiumPolling() {
+                if (this.waitingPodiumPollTimer) clearInterval(this.waitingPodiumPollTimer);
+
+                const poll = async () => {
+                    if (!this.joinedRoomCode) return;
+                    try {
+                        const data = await callApi(`/api/rooms/${this.joinedRoomCode}/status`);
+                        if (data) {
+                            if (data.players && Array.isArray(data.players)) {
+                                this.classmates = data.players.filter(p => p.name !== this.user.name);
+                                this.refreshWaitingPodiumList();
+                            }
+
+                            const counterElem = document.getElementById('waitingCompletedCount');
+                            if (counterElem) {
+                                counterElem.innerText = `${data.completed_players || 0} de ${data.total_players || 1} aluno(s) concluíram`;
+                            }
+
+                            // Revela o pódio somente quando TODOS concluírem ou se liberado pelo professor
+                            if (data.all_completed) {
+                                clearInterval(this.waitingPodiumPollTimer);
+                                this.waitingPodiumPollTimer = null;
+                                this.navigateToPage(() => this.renderGrandFinale(), true);
+                            }
+                        }
+                    } catch (e) {}
+                };
+
+                this.waitingPodiumPollTimer = setInterval(poll, 2000);
+                poll();
+            }
+
+            async renderGrandFinale() {
+                // Última atualização para garantir classificação e desempates 100% precisos
                 if (this.joinedRoomCode) {
                     try {
                         const data = await callApi(`/api/rooms/${this.joinedRoomCode}/status`);
@@ -1408,12 +1633,14 @@
                     } catch (e) {}
                 }
 
-                this.navigateToPage(() => this.renderGrandFinale(), true);
-            }
+                // Remove duplicatas e ordena por pontuação descrescente e tempo crescente
+                const playerMap = new Map();
+                [this.user, ...this.classmates].forEach(p => {
+                    if (p && p.name) playerMap.set(p.name, p);
+                });
 
-            renderGrandFinale() {
-                const allRanked = [this.user, ...this.classmates]
-                    .sort((a, b) => b.score - a.score || a.timeSeconds - b.timeSeconds)
+                const allRanked = Array.from(playerMap.values())
+                    .sort((a, b) => (b.score - a.score) || (a.timeSeconds - b.timeSeconds))
                     .slice(0, 10);
 
                 const top3 = allRanked.slice(0, 3);
@@ -1594,7 +1821,11 @@
                             const count = data.players.length;
                             const statusElem = document.getElementById('adminMatchStatus');
                             if (statusElem) {
-                                statusElem.innerText = `${count} Aluno(s) no Saguão`;
+                                if (data.status === 'IN_GAME') {
+                                    statusElem.innerText = `${data.completed_players || 0}/${count} Aluno(s) concluíram`;
+                                } else {
+                                    statusElem.innerText = `${count} Aluno(s) no Saguão`;
+                                }
                             }
                         }
                     } catch (e) {}
@@ -1624,6 +1855,23 @@
                 this.triggerCountdownAndStart();
             }
 
+            async forceFinishMatch() {
+                if (!this.activeRoomCode) return;
+                try {
+                    await callApi('/api/rooms/force_finish', 'POST', {
+                        room_code: this.activeRoomCode,
+                        pin: this.teacherPin
+                    });
+                } catch (e) {}
+
+                this.channel.postMessage({ 
+                    type: 'FORCE_FINISH', 
+                    roomCode: this.activeRoomCode
+                });
+                
+                this.closeAdminModal();
+            }
+
             async resetMatch() {
                 if (this.activeRoomCode) {
                     try {
@@ -1637,10 +1885,10 @@
             }
 
             exportCSV() {
-                let csvContent = "data:text/csv;charset=utf-8,Nome,Pontuacao,Status\n";
+                let csvContent = "data:text/csv;charset=utf-8,Nome,Pontuacao,TempoSegundos,Status\n";
                 const players = [this.user, ...this.classmates];
                 players.forEach(p => {
-                    csvContent += `${p.name},${p.score},${p.completed ? 'Concluido' : 'Em andamento'}\n`;
+                    csvContent += `${p.name},${p.score},${p.timeSeconds || 0},${p.completed ? 'Concluido' : 'Em andamento'}\n`;
                 });
                 const encodedUri = encodeURI(csvContent);
                 const link = document.createElement("a");

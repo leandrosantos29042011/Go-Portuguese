@@ -1,6 +1,7 @@
 import os
 import random
 import string
+import time
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +11,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="GO PORTUGUESE! Server", version="1.0.0")
 
-# Permitir CORS de qualquer origem para facilitar conexões no Render e em redes locais/móveis
+# Permitir CORS de qualquer origem para conexões no Render, redes locais e celulares
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Salas ficam em memória (com 1 worker no Gunicorn para consistência)
+# Salas ficam em memória (1 worker Gunicorn no Render)
 ROOMS_DB: Dict[str, dict] = {}
 
 # Variável de ambiente TEACHER_PIN (padrão: adm@437)
@@ -38,6 +39,11 @@ class JoinRoomRequest(BaseModel):
     room_code: str = Field(min_length=1, max_length=10)
     player_name: str = Field(min_length=1, max_length=50)
     avatar: dict = Field(default_factory=dict)
+
+
+class LeaveRoomRequest(BaseModel):
+    room_code: str = Field(min_length=1, max_length=10)
+    player_name: str = Field(min_length=1, max_length=50)
 
 
 class UpdateScoreRequest(BaseModel):
@@ -112,6 +118,8 @@ def create_room(req: CreateRoomRequest):
         "room_code": room_code,
         "status": "WAITING",
         "players": {},
+        "created_at": time.time(),
+        "force_finish": False,
     }
     return {"success": True, "room_code": room_code}
 
@@ -131,8 +139,18 @@ def join_room(req: JoinRoomRequest):
         "completed": False,
         "time_seconds": 0,
         "avatar": req.avatar,
+        "last_seen": time.time(),
     }
     return {"success": True, "room_code": code, "status": room["status"]}
+
+
+@app.post("/api/rooms/leave")
+def leave_room(req: LeaveRoomRequest):
+    code = req.room_code.strip()
+    room = ROOMS_DB.get(code)
+    if room and req.player_name in room["players"]:
+        del room["players"][req.player_name]
+    return {"success": True, "message": "Jogador saiu da sala"}
 
 
 @app.post("/api/rooms/start")
@@ -143,7 +161,19 @@ def start_room(req: StartRoomRequest):
     if not room:
         raise HTTPException(status_code=404, detail="Sala não encontrada")
     room["status"] = "IN_GAME"
+    room["force_finish"] = False
     return {"success": True, "message": "Partida iniciada!"}
+
+
+@app.post("/api/rooms/force_finish")
+def force_finish_room(req: StartRoomRequest):
+    require_teacher_pin(req.pin)
+    code = req.room_code.strip()
+    room = ROOMS_DB.get(code)
+    if not room:
+        raise HTTPException(status_code=404, detail="Sala não encontrada")
+    room["force_finish"] = True
+    return {"success": True, "message": "Pódio liberado pelo professor"}
 
 
 @app.get("/api/rooms/{room_code}/status")
@@ -152,14 +182,39 @@ def get_room_status(room_code: str):
     room = ROOMS_DB.get(code)
     if not room:
         raise HTTPException(status_code=404, detail="Sala não encontrada")
+
+    now = time.time()
+    # Remove jogadores inativos por mais de 35 segundos para não travar o pódio se fecharam o jogo
+    stale_players = [
+        name
+        for name, p in room["players"].items()
+        if now - p.get("last_seen", now) > 35
+    ]
+    for name in stale_players:
+        del room["players"][name]
+
+    active_players = list(room["players"].values())
+    total_players = len(active_players)
+    completed_players = sum(1 for p in active_players if p.get("completed", False))
+
+    all_completed = (
+        (total_players > 0 and completed_players >= total_players)
+        or room.get("force_finish", False)
+    )
+
+    # Ordenação por maior pontuação e menor tempo total gasto
     players = sorted(
-        room["players"].values(),
+        active_players,
         key=lambda player: (player["score"], -player.get("time_seconds", 0)),
         reverse=True,
     )
+
     return {
         "room_code": code,
         "status": room["status"],
+        "all_completed": all_completed,
+        "total_players": total_players,
+        "completed_players": completed_players,
         "players": players,
     }
 
@@ -174,6 +229,7 @@ def update_score(req: UpdateScoreRequest):
     player["score"] = req.score
     player["completed"] = req.completed
     player["time_seconds"] = req.time_seconds or 0
+    player["last_seen"] = time.time()
     return {"success": True}
 
 
